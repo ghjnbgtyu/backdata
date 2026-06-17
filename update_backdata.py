@@ -4,7 +4,7 @@ Daily backtest data updater for MES and N225MC.
 Connects to IB (TWS/Gateway must be running), fetches incremental OHLCV bars,
 and pushes to GitHub.
 
-Schedule: 06:30 JST daily via Windows Task Scheduler (run_update.bat).
+Schedule: 06:30 and 15:55 JST daily via Windows Task Scheduler (run_update.bat).
 IB port:  4002 (paper/gateway)
 
 Rollover behaviour

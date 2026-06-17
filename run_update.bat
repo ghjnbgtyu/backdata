@@ -1,6 +1,6 @@
 @echo off
 REM Daily backtest data update launcher
-REM Scheduled via Windows Task Scheduler at 06:30 JST
+REM Scheduled via Windows Task Scheduler at 06:30 and 15:55 JST
 
 cd /d "%~dp0"
 
