@@ -4,7 +4,7 @@ Daily backtest data updater for MES and N225MC.
 Connects to IB (TWS/Gateway must be running), fetches incremental OHLCV bars,
 and pushes to GitHub.
 
-Schedule: 07:30 JST daily via Windows Task Scheduler (run_update.bat).
+Schedule: 06:30 JST daily via Windows Task Scheduler (run_update.bat).
 IB port:  4002 (paper/gateway)
 
 Rollover behaviour
@@ -156,7 +156,8 @@ def _fetch_duration(last_ts: pd.Timestamp | None) -> str:
     """Choose IB durationStr based on staleness."""
     if last_ts is None:
         return "365 D"
-    days = max(int((pd.Timestamp.now() - last_ts).days) + 3, 1)
+    now = pd.Timestamp.now(tz=last_ts.tzinfo)  # match tz so subtraction works
+    days = max(int((now - last_ts).days) + 3, 1)
     if days <= 7:
         return "7 D"
     if days <= 30:
@@ -180,11 +181,16 @@ async def fetch_bars(ib: IB, contract, bar_size: str, duration: str) -> pd.DataF
     if not bars:
         return pd.DataFrame()
     frame = util.df(bars).rename(columns={"date": "datetime"}).set_index("datetime")
+    frame.index = pd.to_datetime(frame.index)  # normalise date/datetime to DatetimeIndex
     return frame[["open", "high", "low", "close", "volume"]]
 
 
 def load_parquet(path: Path) -> pd.DataFrame:
-    return pd.read_parquet(path) if path.exists() else pd.DataFrame()
+    if not path.exists():
+        return pd.DataFrame()
+    df = pd.read_parquet(path)
+    df.index = pd.to_datetime(df.index)  # normalise date/datetime.date to DatetimeIndex
+    return df
 
 
 def merge_and_save(existing: pd.DataFrame, new: pd.DataFrame, path: Path) -> pd.DataFrame:
