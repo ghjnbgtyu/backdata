@@ -2,3 +2,5 @@ logs/
 __pycache__/
 *.pyc
 data/.state.json
+discord_webhook_url.txt
+discord_webhook_bachdata.txt

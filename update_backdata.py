@@ -23,6 +23,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -39,6 +40,7 @@ REPO_DIR = Path(__file__).resolve().parent
 DATA_DIR  = REPO_DIR / "data"
 LOG_DIR   = REPO_DIR / "logs"
 STATE_FILE = DATA_DIR / ".state.json"   # tracks current contract month per instrument
+DISCORD_WEBHOOK_FILE = REPO_DIR / "discord_webhook_bachdata.txt"
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -67,6 +69,36 @@ TIMEFRAMES: list[tuple[str, str]] = [
     ("5_mins", "5 mins"),
     ("1_day",  "1 day"),
 ]
+
+
+# ── discord ────────────────────────────────────────────────────────────────────
+
+def _webhook_url() -> str | None:
+    try:
+        return DISCORD_WEBHOOK_FILE.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+
+
+def discord_notify(message: str) -> None:
+    url = _webhook_url()
+    if not url:
+        return
+    try:
+        payload = json.dumps({"content": message}).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "backdata-updater/1.0",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10):
+            pass
+    except Exception as exc:
+        print(f"  [discord] notify failed: {exc!r}")
 
 
 # ── state file ─────────────────────────────────────────────────────────────────
@@ -235,7 +267,8 @@ async def _pull_contract(
         await asyncio.sleep(IB_PACE_SECONDS)
 
 
-async def update_instrument(ib: IB, name: str, spec: dict, state: dict) -> None:
+async def update_instrument(ib: IB, name: str, spec: dict, state: dict) -> str:
+    """Return a short summary string for Discord notification."""
     prev_month = state.get(name, {}).get("contract_month")
 
     # ── find current front month ──
@@ -243,9 +276,11 @@ async def update_instrument(ib: IB, name: str, spec: dict, state: dict) -> None:
     print(f"  front month: {month_str}  conId={contract.conId}")
 
     rollover = prev_month is not None and prev_month != month_str
+    summary_lines: list[str] = []
 
     if rollover:
         print(f"  ROLLOVER detected: {prev_month} → {month_str}")
+        summary_lines.append(f"🔄 ロールオーバー {prev_month} → {month_str}")
 
         # 1. Pull old contract up to its last trading day
         print(f"  Fetching old contract {prev_month} (last {OLD_CONTRACT_LOOKBACK}) ...")
@@ -266,25 +301,39 @@ async def update_instrument(ib: IB, name: str, spec: dict, state: dict) -> None:
         )
 
     else:
-        # Normal incremental update
+        # Normal incremental update — each timeframe is independent;
+        # a failure in one does not block the others or corrupt state.
+        fetch_errors: list[str] = []
         for tf_name, bar_size in TIMEFRAMES:
-            existing = load_parquet(DATA_DIR / f"{name}_continuous_{tf_name}.parquet")
-            last_ts  = pd.Timestamp(existing.index.max()) if not existing.empty else None
-            duration = _fetch_duration(last_ts)
-            print(f"  [{tf_name}] last={str(last_ts)[:16] if last_ts else 'none'}  requesting {duration}")
-            bars = await fetch_bars(ib, contract, bar_size, duration)
-            added = _append(name, month_str, bars, tf_name)
-            if added:
-                cont = load_parquet(DATA_DIR / f"{name}_continuous_{tf_name}.parquet")
-                print(f"  [{tf_name}] +{added} bars → through {str(cont.index.max())[:16]}")
-            else:
-                print(f"  [{tf_name}] already up to date")
+            try:
+                existing = load_parquet(DATA_DIR / f"{name}_continuous_{tf_name}.parquet")
+                last_ts  = pd.Timestamp(existing.index.max()) if not existing.empty else None
+                duration = _fetch_duration(last_ts)
+                print(f"  [{tf_name}] last={str(last_ts)[:16] if last_ts else 'none'}  requesting {duration}")
+                bars = await fetch_bars(ib, contract, bar_size, duration)
+                added = _append(name, month_str, bars, tf_name)
+                if added:
+                    cont = load_parquet(DATA_DIR / f"{name}_continuous_{tf_name}.parquet")
+                    through = str(cont.index.max())[:16]
+                    print(f"  [{tf_name}] +{added} bars → through {through}")
+                    summary_lines.append(f"  {tf_name}: +{added} bars → {through}")
+                else:
+                    print(f"  [{tf_name}] already up to date")
+                    summary_lines.append(f"  {tf_name}: 更新なし")
+            except Exception as exc:
+                fetch_errors.append(tf_name)
+                print(f"  [{tf_name}] ERROR: {exc!r}")
             await asyncio.sleep(IB_PACE_SECONDS)
 
-    # persist current contract month
+        if fetch_errors:
+            raise RuntimeError(f"fetch failed for timeframes: {fetch_errors}")
+
+    # persist current contract month only after all fetches succeeded
     if name not in state:
         state[name] = {}
     state[name]["contract_month"] = month_str
+
+    return "\n".join(summary_lines)
 
 
 # ── git ────────────────────────────────────────────────────────────────────────
@@ -319,18 +368,38 @@ async def main() -> int:
     errors: list[str] = []
 
     ib = IB()
+    fetch_summaries: list[str] = []  # per-instrument success lines for final notify
     try:
-        await ib.connectAsync(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID)
+        try:
+            await ib.connectAsync(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID)
+        except Exception as exc:
+            msg = f"IB connection failed: {exc!r}"
+            print(msg)
+            discord_notify(f"❌ **backdata** IB接続失敗\n```{exc}```")
+            errors.append(f"connect: {exc!r}")
+            save_state(state)
+            return 1
+
         print(f"IB connected  {IB_HOST}:{IB_PORT}  clientId={IB_CLIENT_ID}\n")
 
         for name, spec in INSTRUMENTS.items():
             print(f"[{name}]")
+            if not ib.isConnected():
+                msg = f"{name}: IB disconnected mid-run, skipping"
+                print(f"  {msg}")
+                errors.append(msg)
+                discord_notify(f"❌ **backdata [{name}]** IB接続が途中で切断")
+                print()
+                continue
             try:
-                await update_instrument(ib, name, spec, state)
+                summary = await update_instrument(ib, name, spec, state)
+                if summary:
+                    fetch_summaries.append(f"**{name}**\n{summary}")
             except Exception as exc:
                 msg = f"{name}: {exc!r}"
                 print(f"  ERROR {msg}")
                 errors.append(msg)
+                discord_notify(f"❌ **backdata [{name}]** エラー\n```{exc}```")
             print()
     finally:
         ib.disconnect()
@@ -343,13 +412,20 @@ async def main() -> int:
     except subprocess.CalledProcessError as exc:
         errors.append(f"git: {exc!r}")
         print(f"Git ERROR: {exc!r}")
+        discord_notify(f"❌ **backdata** git push 失敗\n```{exc}```")
 
-    print(f"\n=== done {datetime.now(JST).strftime('%H:%M JST')} ===")
+    done_time = datetime.now(JST).strftime("%H:%M JST")
+    print(f"\n=== done {done_time} ===")
+
     if errors:
         print("Errors:")
         for e in errors:
             print(f"  {e}")
         return 1
+
+    # 全て成功したら完了通知（新規バーなしでも送る）
+    body = "\n".join(fetch_summaries) if fetch_summaries else "新規データなし（最新済み）"
+    discord_notify(f"✅ **backdata** 更新完了 ({done_time})\n{body}")
     return 0
 
 
