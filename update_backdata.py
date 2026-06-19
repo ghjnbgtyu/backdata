@@ -344,7 +344,6 @@ async def update_instrument(ib: IB, name: str, spec: dict, state: dict) -> str:
 # ── git ────────────────────────────────────────────────────────────────────────
 
 def git_push(today: str) -> None:
-    subprocess.run(["git", "pull", "--rebase"], cwd=REPO_DIR, check=True)
     subprocess.run(["git", "add", "data/"], cwd=REPO_DIR, check=True)
     diff = subprocess.run(
         ["git", "diff", "--cached", "--stat"],
@@ -357,6 +356,7 @@ def git_push(today: str) -> None:
         ["git", "commit", "-m", f"data: update through {today}"],
         cwd=REPO_DIR, check=True,
     )
+    subprocess.run(["git", "pull", "--rebase"], cwd=REPO_DIR, check=True)
     subprocess.run(["git", "push"], cwd=REPO_DIR, check=True)
     print("Git: pushed.")
 
