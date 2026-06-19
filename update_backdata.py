@@ -48,6 +48,7 @@ ROLL_BUFFER_DAYS    = 7    # roll to next contract when < 7 days remain to expir
 OLD_CONTRACT_LOOKBACK = "14 D"  # how far back to pull old contract at rollover
 NEW_CONTRACT_SEED     = "10 D"  # initial lookback for new contract at rollover
 IB_PACE_SECONDS       = 3.0    # wait between reqHistoricalData calls (IB pacing)
+IB_FETCH_TIMEOUT      = 120    # seconds before a single reqHistoricalData is considered hung
 
 INSTRUMENTS: dict[str, dict] = {
     "MES": {
@@ -201,15 +202,18 @@ def _fetch_duration(last_ts: pd.Timestamp | None) -> str:
 
 
 async def fetch_bars(ib: IB, contract, bar_size: str, duration: str) -> pd.DataFrame:
-    bars = await ib.reqHistoricalDataAsync(
-        contract,
-        endDateTime="",
-        durationStr=duration,
-        barSizeSetting=bar_size,
-        whatToShow="TRADES",
-        useRTH=False,
-        formatDate=1,
-        keepUpToDate=False,
+    bars = await asyncio.wait_for(
+        ib.reqHistoricalDataAsync(
+            contract,
+            endDateTime="",
+            durationStr=duration,
+            barSizeSetting=bar_size,
+            whatToShow="TRADES",
+            useRTH=False,
+            formatDate=1,
+            keepUpToDate=False,
+        ),
+        timeout=IB_FETCH_TIMEOUT,
     )
     if not bars:
         return pd.DataFrame()
