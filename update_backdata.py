@@ -66,8 +66,9 @@ INSTRUMENTS: dict[str, dict] = {
 
 # (filename suffix, IB bar size string)
 TIMEFRAMES: list[tuple[str, str]] = [
-    ("5_mins", "5 mins"),
-    ("1_day",  "1 day"),
+    ("5_mins",  "5 mins"),
+    ("30_mins", "30 mins"),
+    ("1_day",   "1 day"),
 ]
 
 
