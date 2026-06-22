@@ -367,10 +367,13 @@ async def main() -> int:
     now_jst = datetime.now(JST)
     print(f"=== backdata update {now_jst.strftime('%Y-%m-%d %H:%M JST')} ===\n")
 
-    # 土曜・日曜は市場が閉じているため更新をスキップ
-    if now_jst.weekday() in (5, 6):
-        day_name = "土曜日" if now_jst.weekday() == 5 else "日曜日"
-        print(f"週末 ({day_name}) のためスキップします。")
+    # 日曜、および土曜の午前中以降はスキップ（土曜 06:30 の朝の更新は実行する）
+    weekday = now_jst.weekday()
+    if weekday == 6:  # 日曜
+        print("日曜日のためスキップします。")
+        return 0
+    if weekday == 5 and now_jst.hour >= 10:  # 土曜 10:00 以降
+        print(f"土曜日の午前更新済みのためスキップします ({now_jst.strftime('%H:%M JST')})。")
         return 0
 
     DATA_DIR.mkdir(exist_ok=True)
